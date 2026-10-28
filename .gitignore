@@ -1,0 +1,13 @@
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.p12
+*.mobileprovision
+.DS_Store
+.env
+.env.*
+*.secret
+.local/
+installers/

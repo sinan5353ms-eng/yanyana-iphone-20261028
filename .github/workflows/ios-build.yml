@@ -1,0 +1,158 @@
+name: YanYana unsigned iPhone build
+
+# Manual build only. This workflow never signs, installs, or publishes an app.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yanyana-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-unsigned:
+    # Standard public-repository runners are free. Private runs are deliberately
+    # disabled so a manual click cannot consume billable private-runner minutes.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: macos-26
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source without retaining credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Locate project and check Xcode
+        id: project
+        run: |
+          set -euo pipefail
+          if [[ -f "$GITHUB_WORKSPACE/YanYana.xcodeproj/project.pbxproj" ]]; then
+            project_dir="$GITHUB_WORKSPACE"
+          elif [[ -f "$GITHUB_WORKSPACE/yanyana-ios/YanYana.xcodeproj/project.pbxproj" ]]; then
+            project_dir="$GITHUB_WORKSPACE/yanyana-ios"
+          else
+            echo "YanYana.xcodeproj was not found at the repository root or in yanyana-ios/." >&2
+            exit 1
+          fi
+          printf 'directory=%s\n' "$project_dir" >> "$GITHUB_OUTPUT"
+          xcodebuild -version
+          xcode_major="$(xcodebuild -version | awk '/^Xcode / { split($2, version, "."); print version[1]; exit }')"
+          if [[ -z "$xcode_major" || "$xcode_major" -lt 26 ]]; then
+            echo "Xcode 26 or newer is required." >&2
+            exit 1
+          fi
+          xcodebuild -showsdks
+          python3 "$project_dir/tools/check_project.py"
+
+      - name: Build for physical iPhones without signing
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.directory }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$PROJECT_DIR/YanYana.xcodeproj" \
+            -scheme YanYana \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/yanyana-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            build
+
+      - name: Run ComposerModel tests on an available iPhone simulator
+        timeout-minutes: 12
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.directory }}
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/yanyana-simulators.json"
+          simulator_id="$(python3 - "$RUNNER_TEMP/yanyana-simulators.json" <<'PY'
+          import json
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              simulator_list = json.load(stream)
+          candidates = []
+          for runtime, devices in simulator_list.get("devices", {}).items():
+              match = re.search(r"\.iOS-(\d+)(?:-(\d+))?(?:-(\d+))?$", runtime)
+              if not match:
+                  continue
+              version = tuple(int(part or 0) for part in match.groups())
+              if version[0] < 26:
+                  continue
+              for device in devices:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      candidates.append((version, device.get("state") == "Booted", device["udid"]))
+          if not candidates:
+              sys.exit("No available iPhone simulator running iOS 26 or newer was found.")
+          print(max(candidates)[2])
+          PY
+          )"
+          printf 'Testing on iPhone simulator %s\n' "$simulator_id"
+          xcodebuild \
+            -project "$PROJECT_DIR/YanYana.xcodeproj" \
+            -scheme YanYana \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$simulator_id" \
+            -destination-timeout 90 \
+            -parallel-testing-enabled NO \
+            -derivedDataPath "$RUNNER_TEMP/yanyana-test-derived" \
+            -resultBundlePath "$RUNNER_TEMP/yanyana-tests.xcresult" \
+            -only-testing:YanYanaTests/ComposerModelTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            test
+
+      - name: Package unsigned app and embedded keyboard
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/yanyana-derived/Build/Products/Release-iphoneos/YanYana.app"
+          stage="$RUNNER_TEMP/yanyana-package"
+          output="$RUNNER_TEMP/yanyana-output"
+          test -f "$app/YanYana"
+          test -f "$app/PlugIns/YanYanaKeyboard.appex/YanYanaKeyboard"
+          test ! -f "$app/embedded.mobileprovision"
+          test ! -f "$app/PlugIns/YanYanaKeyboard.appex/embedded.mobileprovision"
+          mkdir -p "$stage/Payload" "$output"
+          /usr/bin/ditto "$app" "$stage/Payload/YanYana.app"
+          /usr/bin/ditto -c -k --norsrc --keepParent \
+            "$stage/Payload" "$output/YanYana-unsigned.ipa"
+          /usr/bin/unzip -tq "$output/YanYana-unsigned.ipa"
+          (
+            cd "$output"
+            /usr/bin/shasum -a 256 YanYana-unsigned.ipa > SHA256SUMS.txt
+          )
+          {
+            echo 'UNSIGNED BUILD — NOT READY FOR DIRECT INSTALLATION'
+            echo 'This package has no Apple signing certificate or provisioning profile.'
+            echo 'It must be signed locally before it can run on an iPhone.'
+            echo 'This workflow does not sign, install, send messages, or publish to TestFlight/App Store.'
+            xcodebuild -version
+            printf 'Source commit: %s\n' "$GITHUB_SHA"
+          } > "$output/BUILD-INFO.txt"
+          {
+            echo '### Unsigned YanYana package created'
+            echo 'Download the artifact below. Apple signing and iPhone installation are still required.'
+            echo 'No Apple credentials or signing secrets were requested.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: YanYana-unsigned-iphone
+          path: ${{ runner.temp }}/yanyana-output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
