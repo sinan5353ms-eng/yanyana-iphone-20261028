@@ -67,6 +67,48 @@ jobs:
             DEVELOPMENT_TEAM= \
             build
 
+      - name: Package unsigned app and embedded keyboard
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/yanyana-derived/Build/Products/Release-iphoneos/YanYana.app"
+          stage="$RUNNER_TEMP/yanyana-package"
+          output="$RUNNER_TEMP/yanyana-output"
+          test -f "$app/YanYana"
+          test -f "$app/PlugIns/YanYanaKeyboard.appex/YanYanaKeyboard"
+          test ! -f "$app/embedded.mobileprovision"
+          test ! -f "$app/PlugIns/YanYanaKeyboard.appex/embedded.mobileprovision"
+          mkdir -p "$stage/Payload" "$output"
+          /usr/bin/ditto "$app" "$stage/Payload/YanYana.app"
+          /usr/bin/ditto -c -k --norsrc --keepParent \
+            "$stage/Payload" "$output/YanYana-unsigned.ipa"
+          /usr/bin/unzip -tq "$output/YanYana-unsigned.ipa"
+          (
+            cd "$output"
+            /usr/bin/shasum -a 256 YanYana-unsigned.ipa > SHA256SUMS.txt
+          )
+          {
+            echo 'UNSIGNED BUILD — NOT READY FOR DIRECT INSTALLATION'
+            echo 'This package has no Apple signing certificate or provisioning profile.'
+            echo 'It must be signed locally before it can run on an iPhone.'
+            echo 'This workflow does not sign, install, send messages, or publish to TestFlight/App Store.'
+            xcodebuild -version
+            printf 'Source commit: %s\n' "$GITHUB_SHA"
+          } > "$output/BUILD-INFO.txt"
+          {
+            echo '### Unsigned YanYana package created'
+            echo 'Download the artifact below. Apple signing and iPhone installation are still required.'
+            echo 'No Apple credentials or signing secrets were requested.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: YanYana-unsigned-iphone
+          path: ${{ runner.temp }}/yanyana-output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Run ComposerModel tests on an available iPhone simulator
         timeout-minutes: 12
         env:
@@ -114,45 +156,3 @@ jobs:
             CODE_SIGN_IDENTITY= \
             DEVELOPMENT_TEAM= \
             test
-
-      - name: Package unsigned app and embedded keyboard
-        run: |
-          set -euo pipefail
-          app="$RUNNER_TEMP/yanyana-derived/Build/Products/Release-iphoneos/YanYana.app"
-          stage="$RUNNER_TEMP/yanyana-package"
-          output="$RUNNER_TEMP/yanyana-output"
-          test -f "$app/YanYana"
-          test -f "$app/PlugIns/YanYanaKeyboard.appex/YanYanaKeyboard"
-          test ! -f "$app/embedded.mobileprovision"
-          test ! -f "$app/PlugIns/YanYanaKeyboard.appex/embedded.mobileprovision"
-          mkdir -p "$stage/Payload" "$output"
-          /usr/bin/ditto "$app" "$stage/Payload/YanYana.app"
-          /usr/bin/ditto -c -k --norsrc --keepParent \
-            "$stage/Payload" "$output/YanYana-unsigned.ipa"
-          /usr/bin/unzip -tq "$output/YanYana-unsigned.ipa"
-          (
-            cd "$output"
-            /usr/bin/shasum -a 256 YanYana-unsigned.ipa > SHA256SUMS.txt
-          )
-          {
-            echo 'UNSIGNED BUILD — NOT READY FOR DIRECT INSTALLATION'
-            echo 'This package has no Apple signing certificate or provisioning profile.'
-            echo 'It must be signed locally before it can run on an iPhone.'
-            echo 'This workflow does not sign, install, send messages, or publish to TestFlight/App Store.'
-            xcodebuild -version
-            printf 'Source commit: %s\n' "$GITHUB_SHA"
-          } > "$output/BUILD-INFO.txt"
-          {
-            echo '### Unsigned YanYana package created'
-            echo 'Download the artifact below. Apple signing and iPhone installation are still required.'
-            echo 'No Apple credentials or signing secrets were requested.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload unsigned package
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: YanYana-unsigned-iphone
-          path: ${{ runner.temp }}/yanyana-output/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
